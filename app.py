@@ -128,41 +128,38 @@ def yandex_track(track_id):
 
 # ---------- Отправка аудио ----------
 
-def deliver(chat_id, info):
-    params = {
-        "chat_id": chat_id,
-        "audio": info["url"],
-        "title": info["title"],
-        "performer": info["artist"],
-    }
-    if info.get("duration"):
-        params["duration"] = info["duration"]
-    res = tg("sendAudio", **params)
-    if res.get("ok"):
-        return True
+def safe_name(text):
+    return "".join(c for c in text if c not in '\\/:*?"<>|')[:80].strip() or "track"
 
-    # Запасной путь: скачиваем сами и загружаем в Telegram
-    log("sendAudio by URL failed:", res.get("description"))
+
+def deliver(chat_id, info):
+    filename = f"{safe_name(info['artist'])} - {safe_name(info['title'])}.mp3"
+    # Основной путь: скачиваем сами и загружаем в Telegram (правильные имя и название)
     try:
         with requests.get(info["url"], stream=True, timeout=40) as r:
             r.raise_for_status()
-            buf = b""
+            buf = bytearray()
             for chunk in r.iter_content(256 * 1024):
-                buf += chunk
+                buf.extend(chunk)
                 if len(buf) > MAX_UPLOAD:
                     raise ValueError("файл больше 48 МБ")
+        data = {"chat_id": chat_id, "title": info["title"], "performer": info["artist"]}
+        if info.get("duration"):
+            data["duration"] = info["duration"]
         up = requests.post(
-            f"{TG}/sendAudio",
-            data={"chat_id": chat_id, "title": info["title"], "performer": info["artist"]},
-            files={"audio": (f"{info['artist']} - {info['title']}.mp3", buf)},
-            timeout=60,
+            f"{TG}/sendAudio", data=data, files={"audio": (filename, bytes(buf), "audio/mpeg")}, timeout=60
         ).json()
         if up.get("ok"):
             return True
         log("upload failed:", up.get("description"))
     except Exception as e:  # noqa: BLE001
-        log("fallback download failed:", e)
-    return False
+        log("download/upload failed:", e)
+
+    # Запасной путь: отдаём Telegram ссылку
+    params = {"chat_id": chat_id, "audio": info["url"], "title": info["title"], "performer": info["artist"]}
+    if info.get("duration"):
+        params["duration"] = info["duration"]
+    return bool(tg("sendAudio", **params).get("ok"))
 
 
 # ---------- Логика бота ----------
@@ -184,6 +181,18 @@ def on_text(chat_id, text):
             chat_id=chat_id,
             text="Привет! Напиши название песни или исполнителя, и я найду её.",
         )
+        return
+    if text.startswith("/ymtest"):
+        if not YM_TOKEN:
+            msg = "YANDEX_MUSIC_TOKEN не задан в переменных Vercel (или нет Redeploy)."
+        else:
+            try:
+                res = ym().search("test", type_="track")
+                n = len(res.tracks.results) if res and res.tracks else 0
+                msg = f"Яндекс работает, найдено треков: {n}"
+            except Exception as e:  # noqa: BLE001
+                msg = f"Ошибка Яндекса: {type(e).__name__}: {e}"[:1000]
+        tg("sendMessage", chat_id=chat_id, text=msg)
         return
     if not text or text.startswith("/"):
         return
